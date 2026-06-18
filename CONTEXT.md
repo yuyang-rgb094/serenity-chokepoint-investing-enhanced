@@ -6,12 +6,14 @@ An enhanced research skill for AI infrastructure supply-chain chokepoint investi
 deployed on OpenClaw / Hermes-compatible agent platforms.
 
 The core thesis: **find the bottleneck first, find the listed exposure second,
-verify through evidence third, size by catalyst window fourth.**
+verify through evidence third, validate with statistics fourth, size by alpha significance fifth.**
 
 This is NOT a buy/sell recommendation engine. It is a structured research workflow
-that helps an agent identify whether a company sits inside a real supply-chain
-bottleneck created by AI infrastructure expansion, and whether the market has
-underpriced the factor exposure change driven by milestone events.
+that helps an agent:
+1. Identify whether a company sits inside a real supply-chain bottleneck
+2. Generate a testable hypothesis about abnormal alpha
+3. Verify the hypothesis with statistical methods (Fama-MacBeth regression, Information Ratio)
+4. Size positions based on statistical evidence
 
 ---
 
@@ -34,7 +36,7 @@ underpriced the factor exposure change driven by milestone events.
 | **Catalyst Window** | The period (typically 1-2 quarters) during which a milestone event's factor exposure change is partially but not fully priced in. The optimal entry zone for catalyst-driven positions. |
 | **Crowding** | The degree to which the investment thesis is already held and discussed by market participants. Measured by KOL attention, social media volume, options activity, short interest, and sell-side coverage. |
 | **Alpha Source** | The specific mechanism by which the investment thesis generates excess returns: (1) milestone-rerating lag, (2) super-trend duration, (3) factor mispricing, (4) crowding dislocation. |
-| **Position Sizing Framework** | A risk-adjusted allocation scheme that maps evidence level, crowding, catalyst clarity, and liquidity to conservative position size ranges. |
+| **Position Sizing Framework** | A risk-adjusted allocation scheme that maps statistical evidence (α, IR), bet type, evidence stage, crowding, and liquidity to conservative position size ranges. Uses weighted (not multiplicative) adjustments with hard floor. |
 | **Fact** | An objectively verifiable statement supported by primary data (filings, contracts, customs data, financial numbers). Must be tagged `[FACT]` in agent output. |
 | **Opinion** | A subjective judgment, prediction, or evaluation. Must be tagged `[OPINION]` in agent output. |
 | **Inference** | A conclusion derived by the agent from facts via logical reasoning. Must be tagged `[INFERENCE]` and include the derivation chain. |
@@ -46,30 +48,59 @@ underpriced the factor exposure change driven by milestone events.
 |------|-----------|
 | **Primary Analysis Subagent** | The main agent performing the chokepoint analysis, evidence evaluation, and opportunity classification. |
 | **Verification Subagent** | A dedicated subagent responsible for cross-checking every analytical conclusion: (1) verifying the authenticity of data sources cited by the primary agent, (2) retrieving non-correlated data sources to confirm the same fact. |
+| **Quantitative Verification Subagent** | A dedicated subagent that writes and executes Python code to run Fama-MacBeth regression, compute Information Ratio, and perform GMM robustness checks. Spawned after the LLM generates a qualitative hypothesis. |
 | **Data Source Layer** | The hierarchy of information sources: L1 (company filings), L2 (earnings calls / investor presentations), L3 (official press releases / customer announcements), L4 (industry reports), L5 (financial news), L6 (social media / KOL). |
 | **Cross-Validation Layer** | The process of comparing target company financials against upstream/downstream peer financials to detect corroborating or contradicting signals in the "hidden space" of numerical intersections. |
 | **Supply-Chain Ontology** | A pre-defined knowledge graph mapping AI infrastructure supply chain nodes by process stage, NOT by material type. Used to validate whether a claimed supplier actually sits at the asserted node. |
 | **Catalyst Signal Scanner** | A periodic (quarterly) scan of target supply chain layers for leading indicators of milestone events: inventory changes, prepayment shifts, capex guidance divergences, customs data anomalies. |
 | **Fact-Opinion Discriminator** | A methodological layer (system prompt + structured rules) that forces the agent to explicitly tag every statement as Fact, Opinion, or Inference. |
+| **Information Ratio (IR)** | A measure of risk-adjusted abnormal return: IR = α / σ(ε), where α is the intercept from Fama-MacBeth regression and σ(ε) is the standard deviation of residuals. IR > 1.0 indicates strong alpha; IR < 0.3 indicates alpha not economically meaningful. |
+| **Fama-MacBeth Regression** | A two-pass regression procedure used to estimate factor exposures and abnormal returns (alpha). First pass: time-series regression for each asset. Second pass: cross-sectional regression to estimate risk premia. |
+| **GMM Robustness Check** | Generalized Method of Moments check to verify alpha persistence across sub-periods and stability of factor loadings over time. |
 
 ---
 
 ## Key Decisions
 
-### ADR-001: Two-Stage Analysis Model (Bottleneck × Pricing Efficiency)
+### ADR-001: Two-Layer Architecture (LLM Qualitative + Code Quantitative)
 
-**Status:** Accepted
+**Status:** Accepted (Revised v2.1)
 
-**Context:** The original framework used a linear 100-point scoring model where chokepoint quality (20 points) and valuation/pricing (10 points) were additive. This created a structural bias toward "strong bottleneck but fully priced" opportunities receiving high total scores despite lacking alpha.
+**Context:** The original framework (v1.0) used a linear 100-point additive scoring model. v2.0 attempted to fix this with a four-dimensional multiplicative probability model, but peer review identified critical flaws:
+1. P(is_bottleneck) was double-counted (Stage 1 filter + Stage 2 dimension)
+2. Multiplicative over-penalty: four dimensions at 0.7 scored 0.24, producing excessive false negatives
+3. LLMs are systematically poor at probability calibration
+4. In low-SNR markets, averaging or multiplying noisy estimates further dilutes signal
 
 **Decision:**
-Replace the additive scoring model with a **two-stage multiplicative model**:
-- **Stage 1 (Bottleneck Identification):** Qualitative/structural filter. Uses a 10-question chokepoint score (0-20 points) to determine whether a node is a real bottleneck. Minimum threshold: 12 points (Medium chokepoint) to proceed.
-- **Stage 2 (Alpha Assessment):** Multiplicative assessment of `Liquidity × Win Rate × Payoff × Catalyst Clarity`. Only applied to Stage 1 qualifiers.
+Replace the LLM-driven multiplicative model with a **two-layer architecture**:
 
-The final opportunity quality is NOT a sum but a **conditional probability**: `P(alpha) = P(is_bottleneck) × P(mispriced | is_bottleneck) × P(catalyst_within_window | mispriced)`.
+**Layer 1 — LLM Qualitative (Hypothesis Generation):**
+- Identify supertrend, validate process node, score chokepoint quality (Stage 1 hard filter)
+- Assess evidence stage, cross-validate supply chain, classify bet type
+- Generate testable hypothesis: "This company has abnormal alpha not explained by the four-factor model"
 
-**Rationale:** A real bottleneck that is fully priced offers no alpha. A weak bottleneck that is undervalued is likely undervalued for good reason. The multiplicative model correctly penalizes either deficiency.
+**Layer 2 — Code Quantitative (Hypothesis Testing):**
+- Pull 3-5 years historical returns + four-factor data (MKT, SMB, HML, MOM)
+- Run Fama-MacBeth regression: R_i - R_f = α + β₁·MKT + β₂·SMB + β₃·HML + β₄·MOM + ε
+- Test H₀: α = 0 (significance at 5% level)
+- Compute Information Ratio: IR = α / σ(ε)
+- Run GMM robustness check for alpha persistence
+
+**Layer 3 — LLM Synthesis (Interpretation):**
+- Compare qualitative hypothesis with quantitative results
+- Is α economically meaningful given target holding period?
+- Final classification based on BOTH evidence types
+
+**Hard Constraints:**
+- Chokepoint score < 12 → Reject
+- α not significant (p > 0.05) → Downgrade to "Watchlist" or "Avoid"
+- IR < 0.3 → Reject — alpha not economically meaningful
+- Any qualitative dimension < 0.3 → Reject
+
+**Fallback:** If code execution unavailable, LLM performs qualitative-only with explicit warning and position sizing capped at 50%.
+
+**Rationale:** Alpha should be computed by statistical methods, not guessed by language models. The Information Ratio ensures alpha is economically meaningful (significantly above noise), not just statistically significant. Fama-MacBeth regression provides rigorous factor control. GMM validates persistence.
 
 ---
 
@@ -174,21 +205,29 @@ The agent must classify each opportunity by **bet type** before position sizing:
 | Catalyst Alpha | 1-4 quarters | Milestone timeline, catalyst window, factor exposure change timing |
 | Event-Driven | 0-3 months | Specific catalyst event (earnings, contract announcement, regulatory decision) |
 
-Position sizing is then adjusted by:
+Position sizing uses **weighted (not multiplicative)** adjustments:
+- Base size determined by bet type
+- Adjustments applied as absolute percentage point modifiers (e.g., -1%, -2%)
+- Hard floor: max(Base Size × 25%, 0.5%) — prevents compounding to near-zero
+- Hard cap: 20% for any single position
+
+Adjustment factors:
 - Evidence stage (earlier stage = smaller size)
 - Crowding level (higher crowding = reduced size)
 - Catalyst clarity (clearer timeline = larger size)
 - Liquidity constraint (lower liquidity = smaller size)
+- Statistical evidence: IR > 1.0 allows full size; IR 0.5-1.0 reduces size; IR < 0.5 caps at small position
 
-**Rationale:** Mismatched holding period and bet type is a major source of investor losses. A catalyst-alpha position held for 2 years will likely round-trip. A super-beta position sold after one quarter captures almost none of the upside.
+**Rationale:** Mismatched holding period and bet type is a major source of investor losses. Multiplicative adjustments (e.g., ×0.5 ×0.75) can compress a 5% base to <1%, making positions economically meaningless. Weighted adjustments with hard floor ensure viable position sizes while preserving risk discipline.
 
 ---
 
 ## Design Principles
 
-1. **Bottleneck First, Price Second:** A real bottleneck is necessary but not sufficient. The market must still be underestimating the node.
+1. **Bottleneck First, Statistics Second:** A real bottleneck is necessary but not sufficient. Alpha must be verified by statistical methods (Fama-MacBeth regression, Information Ratio), not guessed by language models.
 2. **Milestone Over Narrative:** Invest in evidence stage transitions, not in stories. KOL posts generate ideas; financial numbers validate them.
 3. **Cross-Validation Over Isolation:** No single company's filings tell the full story. The truth lives in the intersection of upstream, downstream, and competitor data.
 4. **Catalyst Window Discipline:** Enter when factor exposure change is beginning. Exit when fully priced or thesis disconfirmed. Time is not on the side of catalyst trades.
 5. **Fact Discrimination:** Every statement must be tagged as Fact, Opinion, or Inference. Facts must be triangulated. Opinions must be attributed.
 6. **Verification by Subagent:** No analytical conclusion stands without independent verification. The verification subagent is not optional — it is a structural safeguard.
+7. **Code Over Intuition for Alpha:** LLMs generate hypotheses; code validates them. Alpha should be computed, not estimated. Information Ratio ensures economic significance, not just statistical significance.
